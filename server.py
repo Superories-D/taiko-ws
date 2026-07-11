@@ -24,10 +24,12 @@ server_config = {
 }
 
 
-def msgobj(msg_type, value=None):
+def msgobj(msg_type, value=None, metadata=None):
     message = {'type': msg_type}
     if value is not None:
         message['value'] = value
+    if metadata:
+        message.update(metadata)
     return json.dumps(message, separators=(',', ':'))
 
 
@@ -59,11 +61,11 @@ def consume_message_rate(user, now=None):
     return len(timestamps) <= server_config['max_messages_per_second']
 
 
-async def send_to(user, msg_type, value=None):
+async def send_to(user, msg_type, value=None, metadata=None):
     if not is_connected(user):
         return False
     try:
-        await user['ws'].send(msgobj(msg_type, value))
+        await user['ws'].send(msgobj(msg_type, value, metadata))
         return True
     except ConnectionClosed:
         return False
@@ -213,7 +215,11 @@ async def process_playing(user, msg_type, value):
         await send_many((user, 'gameend'), (user, 'users', json.loads(status_event()).get('value', [])))
         return
     if msg_type in ('note', 'drumroll', 'branch', 'gameresults'):
-        await send_to(other, msg_type, value)
+        user['relay_seq'] = user.get('relay_seq', 0) + 1
+        await send_to(other, msg_type, value, {
+            'seq': user['relay_seq'],
+            'server_time': int(time.time() * 1000)
+        })
     elif msg_type == 'songsel' and user.get('session'):
         user['action'] = other['action'] = 'songsel'
         await send_many((user, 'songsel'), (user, 'users', []), (other, 'songsel'), (other, 'users', []))
@@ -289,6 +295,9 @@ async def process_message(user, message):
         return
     msg_type = data.get('type')
     value = data.get('value')
+    if msg_type == 'syncping':
+        await send_to(user, 'syncpong', value, {'server_time': int(time.time() * 1000)})
+        return
     action = user['action']
     if action == 'ready':
         if msg_type == 'join':
@@ -342,7 +351,8 @@ async def connection(websocket):
         'name': None,
         'don': None,
         'message_times': deque(),
-        'invalid_invites': 0
+        'invalid_invites': 0,
+        'relay_seq': 0
     }
     server_status['users'].append(user)
     try:

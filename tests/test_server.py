@@ -10,7 +10,26 @@ from websockets.exceptions import InvalidStatusCode
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
-from server import connection, consume_message_rate, parse_origins, process_request, server_config, server_status, set_identity
+from server import (
+    connection,
+    consume_message_rate,
+    parse_origins,
+    process_message,
+    process_playing,
+    process_request,
+    server_config,
+    server_status,
+    set_identity
+)
+
+
+class RecordingWebSocket:
+    def __init__(self):
+        self.closed = False
+        self.messages = []
+
+    async def send(self, message):
+        self.messages.append(json.loads(message))
 
 
 class MultiplayerServerTests(unittest.TestCase):
@@ -66,6 +85,35 @@ class MultiplayerServerTests(unittest.TestCase):
         })
         self.assertEqual(user['name'], 'x' * 25)
         self.assertEqual(user['don'], {'body_fill': '#123456', 'face_fill': '#abcdef'})
+
+    def test_play_messages_have_monotonic_relay_sequences(self):
+        async def scenario():
+            first_ws = RecordingWebSocket()
+            second_ws = RecordingWebSocket()
+            first = {'ws': first_ws, 'action': 'playing', 'relay_seq': 0}
+            second = {'ws': second_ws, 'action': 'playing', 'relay_seq': 0}
+            first['other_user'] = second
+            second['other_user'] = first
+            await process_playing(first, 'note', {'score': 450})
+            await process_playing(first, 'branch', 'master')
+            self.assertEqual([message['seq'] for message in second_ws.messages], [1, 2])
+            self.assertTrue(all('server_time' in message for message in second_ws.messages))
+
+        asyncio.run(scenario())
+
+    def test_latency_probe_works_in_every_room_state(self):
+        async def scenario():
+            websocket = RecordingWebSocket()
+            user = {'ws': websocket, 'action': 'songsel'}
+            await process_message(user, json.dumps({
+                'type': 'syncping',
+                'value': {'sentAt': 1234}
+            }))
+            self.assertEqual(websocket.messages[0]['type'], 'syncpong')
+            self.assertEqual(websocket.messages[0]['value']['sentAt'], 1234)
+            self.assertIn('server_time', websocket.messages[0])
+
+        asyncio.run(scenario())
 
     async def _invite_room(self):
         listener = await serve(
