@@ -1,0 +1,9 @@
+services:
+  multiplayer:
+    build: .
+    container_name: taiko-multiplayer-server
+    env_file:
+      - .env
+    ports:
+      - "${PORT:-34802}:${PORT:-34802}"
+    restart: unless-stopped
