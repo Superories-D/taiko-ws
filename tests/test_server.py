@@ -10,7 +10,7 @@ from websockets.exceptions import InvalidStatusCode
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
-from server import connection, parse_origins, process_request, server_config, server_status
+from server import connection, consume_message_rate, parse_origins, process_request, server_config, server_status, set_identity
 
 
 class MultiplayerServerTests(unittest.TestCase):
@@ -19,6 +19,7 @@ class MultiplayerServerTests(unittest.TestCase):
         server_status['users'].clear()
         server_status['invites'].clear()
         server_config['max_connections'] = 100
+        server_config['max_messages_per_second'] = 120
 
     def test_origins_must_be_explicit(self):
         self.assertEqual(parse_origins('https://a.example, https://b.example'), ['https://a.example', 'https://b.example'])
@@ -50,6 +51,21 @@ class MultiplayerServerTests(unittest.TestCase):
 
     def test_hard_capacity_rejects_new_websocket_handshakes(self):
         asyncio.run(self._reject_at_capacity())
+
+    def test_message_flood_limit_is_per_connection(self):
+        user = {}
+        self.assertTrue(all(consume_message_rate(user, now=1) for _ in range(120)))
+        self.assertFalse(consume_message_rate(user, now=1))
+        self.assertTrue(consume_message_rate(user, now=2.1))
+
+    def test_identity_fields_are_bounded_and_filtered(self):
+        user = {}
+        set_identity(user, {
+            'name': 'x' * 100,
+            'don': {'body_fill': '#123456', 'face_fill': '#abcdef', 'unexpected': 'ignored'}
+        })
+        self.assertEqual(user['name'], 'x' * 25)
+        self.assertEqual(user['don'], {'body_fill': '#123456', 'face_fill': '#abcdef'})
 
     async def _invite_room(self):
         listener = await serve(

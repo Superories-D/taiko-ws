@@ -3,10 +3,12 @@
 
 import argparse
 import asyncio
+from collections import deque
 from http import HTTPStatus
 import json
 import os
 import random
+import time
 from urllib.parse import urlsplit
 
 from websockets.exceptions import ConnectionClosed
@@ -15,7 +17,11 @@ from websockets.legacy.server import serve
 
 CONSONANTS = 'bcdfghjklmnpqrstvwxyz'
 server_status = {'waiting': {}, 'users': [], 'invites': {}}
-server_config = {'max_connections': 100}
+server_config = {
+    'max_connections': 100,
+    'max_messages_per_second': 120,
+    'max_invalid_invites': 5
+}
 
 
 def msgobj(msg_type, value=None):
@@ -42,6 +48,15 @@ def is_connected(user):
 
 def at_capacity():
     return len(server_status['users']) >= server_config['max_connections']
+
+
+def consume_message_rate(user, now=None):
+    now = time.monotonic() if now is None else now
+    timestamps = user.setdefault('message_times', deque())
+    while timestamps and timestamps[0] <= now - 1:
+        timestamps.popleft()
+    timestamps.append(now)
+    return len(timestamps) <= server_config['max_messages_per_second']
 
 
 async def send_to(user, msg_type, value=None):
@@ -81,8 +96,17 @@ def remove_waiting_user(user):
 
 def set_identity(user, value):
     value = value if isinstance(value, dict) else {}
-    user['name'] = value.get('name')
-    user['don'] = value.get('don')
+    name = value.get('name')
+    user['name'] = name[:25] if isinstance(name, str) else None
+    don = value.get('don')
+    if isinstance(don, dict):
+        user['don'] = {
+            key: color[:64]
+            for key, color in don.items()
+            if key in ('body_fill', 'face_fill') and isinstance(color, str)
+        }
+    else:
+        user['don'] = None
 
 
 async def start_open_match(user, value):
@@ -131,10 +155,23 @@ async def start_invite(user, value):
         await send_to(user, 'invite', invite)
         return
 
+    if not isinstance(invite_id, str) or len(invite_id) != 5 or any(char not in CONSONANTS for char in invite_id):
+        user['invalid_invites'] = user.get('invalid_invites', 0) + 1
+        if user['invalid_invites'] >= server_config['max_invalid_invites']:
+            await user['ws'].close(code=1008, reason='Too many invalid invitation attempts')
+        else:
+            await send_to(user, 'gameend')
+        return
+
     other = server_status['invites'].pop(invite_id, None)
     if not other or not is_connected(other):
+        user['invalid_invites'] = user.get('invalid_invites', 0) + 1
+        if user['invalid_invites'] >= server_config['max_invalid_invites']:
+            await user['ws'].close(code=1008, reason='Too many invalid invitation attempts')
+            return
         await send_to(user, 'gameend')
         return
+    user['invalid_invites'] = 0
     set_identity(user, value)
     user['other_user'] = other
     other['other_user'] = user
@@ -298,11 +335,22 @@ async def connection(websocket):
     if at_capacity():
         await websocket.close(code=1013, reason='Multiplayer server is at capacity')
         return
-    user = {'ws': websocket, 'action': 'ready', 'session': False, 'name': None, 'don': None}
+    user = {
+        'ws': websocket,
+        'action': 'ready',
+        'session': False,
+        'name': None,
+        'don': None,
+        'message_times': deque(),
+        'invalid_invites': 0
+    }
     server_status['users'].append(user)
     try:
         await websocket.send(status_event())
         async for message in websocket:
+            if not consume_message_rate(user):
+                await websocket.close(code=1008, reason='Message rate limit exceeded')
+                break
             try:
                 await process_message(user, message)
             except Exception as exc:
@@ -355,15 +403,23 @@ def parse_args():
     parser.add_argument('--bind-address', default=os.environ.get('BIND_ADDRESS', '0.0.0.0'))
     parser.add_argument('--allowed-origins', default=os.environ.get('ALLOWED_ORIGINS', ''))
     parser.add_argument('--max-connections', type=int, default=int(os.environ.get('MAX_CONNECTIONS', '100')))
+    parser.add_argument(
+        '--max-messages-per-second',
+        type=int,
+        default=int(os.environ.get('MAX_MESSAGES_PER_SECOND', '120'))
+    )
     args = parser.parse_args()
     if not 1 <= args.max_connections <= 100000:
         parser.error('--max-connections must be between 1 and 100000')
+    if not 20 <= args.max_messages_per_second <= 1000:
+        parser.error('--max-messages-per-second must be between 20 and 1000')
     return args
 
 
 async def run_server(args):
     origins = parse_origins(args.allowed_origins)
     server_config['max_connections'] = args.max_connections
+    server_config['max_messages_per_second'] = args.max_messages_per_second
     async with serve(
         connection,
         args.bind_address,
