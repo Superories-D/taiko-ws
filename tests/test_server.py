@@ -115,6 +115,29 @@ class MultiplayerServerTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
+    def test_ready_messages_are_idempotent(self):
+        async def scenario():
+            first_ws = RecordingWebSocket()
+            second_ws = RecordingWebSocket()
+            first = {'ws': first_ws, 'action': 'loading'}
+            second = {'ws': second_ws, 'action': 'loading'}
+            first['other_user'] = second
+            second['other_user'] = first
+
+            ready = json.dumps({'type': 'gamestart'})
+            await process_message(first, ready)
+            await process_message(first, ready)
+            self.assertEqual(first['action'], 'loaded')
+            self.assertEqual(second['action'], 'loading')
+
+            await process_message(second, ready)
+            self.assertEqual(first['action'], 'playing')
+            self.assertEqual(second['action'], 'playing')
+            self.assertEqual(first_ws.messages[-1]['type'], 'gamestart')
+            self.assertEqual(second_ws.messages[-1]['type'], 'gamestart')
+
+        asyncio.run(scenario())
+
     async def _invite_room(self):
         listener = await serve(
             connection,

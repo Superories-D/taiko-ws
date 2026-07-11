@@ -307,8 +307,9 @@ async def process_message(user, message):
     elif action in ('waiting', 'loading', 'loaded'):
         if msg_type == 'leave':
             await leave_waiting_or_loading(user)
-        elif action == 'loading' and msg_type == 'gamestart':
-            user['action'] = 'loaded'
+        elif action in ('loading', 'loaded') and msg_type == 'gamestart':
+            if action == 'loading':
+                user['action'] = 'loaded'
             other = user.get('other_user')
             if other and other.get('action') == 'loaded':
                 user['action'] = other['action'] = 'playing'
