@@ -61,7 +61,23 @@ if [ ! -f .env ]; then
   echo "Created .env. Re-run this script after editing it to apply changes."
 fi
 
-"${COMPOSE[@]}" up -d --build
+deploy_log=$(mktemp)
+if ! "${COMPOSE[@]}" up -d --build 2>&1 | tee "$deploy_log"; then
+  if grep -q "ContainerConfig" "$deploy_log"; then
+    echo "Legacy Docker Compose hit the ContainerConfig recreation bug; removing only this stateless WS project's containers and retrying."
+    project_name=${COMPOSE_PROJECT_NAME:-$(basename "$SCRIPT_DIR")}
+    container_ids=$(docker ps -aq --filter "label=com.docker.compose.project=${project_name}")
+    if [ -n "$container_ids" ]; then
+      docker rm -f $container_ids >/dev/null 2>&1 || true
+    fi
+    docker rm -f taiko-multiplayer-server >/dev/null 2>&1 || true
+    "${COMPOSE[@]}" up -d --build
+  else
+    rm -f "$deploy_log"
+    exit 1
+  fi
+fi
+rm -f "$deploy_log"
 "${COMPOSE[@]}" ps
 echo "Deployment complete. Verify with: curl http://127.0.0.1:$(grep '^PORT=' .env | cut -d= -f2)/health"
 echo "Set the same online limit in Taiko Web Admin → Multiplayer. This server will still reject joins at MAX_CONNECTIONS as a safety backstop."
