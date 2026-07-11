@@ -79,5 +79,26 @@ if ! "${COMPOSE[@]}" up -d --build 2>&1 | tee "$deploy_log"; then
 fi
 rm -f "$deploy_log"
 "${COMPOSE[@]}" ps
-echo "Deployment complete. Verify with: curl http://127.0.0.1:$(grep '^PORT=' .env | cut -d= -f2)/health"
+health_port=$(grep '^PORT=' .env | cut -d= -f2)
+health_url="http://127.0.0.1:${health_port}/health"
+health_ready=false
+for _attempt in $(seq 1 30); do
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsS "$health_url" >/dev/null 2>&1 && health_ready=true
+  else
+    docker exec taiko-multiplayer-server python -c \
+      "import urllib.request; urllib.request.urlopen('${health_url}', timeout=2).read()" \
+      >/dev/null 2>&1 && health_ready=true
+  fi
+  if [ "$health_ready" = "true" ]; then
+    break
+  fi
+  sleep 1
+done
+if [ "$health_ready" != "true" ]; then
+  echo "Multiplayer container did not become healthy within 30 seconds." >&2
+  docker logs --tail 100 taiko-multiplayer-server >&2 2>/dev/null || true
+  exit 1
+fi
+echo "Deployment complete. Health check passed: ${health_url}"
 echo "Set the same online limit in Taiko Web Admin → Multiplayer. This server will still reject joins at MAX_CONNECTIONS as a safety backstop."
